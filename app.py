@@ -2,26 +2,38 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 from datetime import datetime
+import plotly.express as px
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Trade Tracker Pro", layout="wide", page_icon="📈")
 
-# --- FUNÇÃO DE FORMATAÇÃO BR ---
+# --- DICIONÁRIO DE PRODUTOS E SUBPRODUTOS ---
+MAPA_PRODUTOS = {
+    "Renda Fixa": ["Emissão Bancária", "Crédito Privado", "Títulos Públicos", "Letras Fin/LIG", "Ofertas Públicas", "Tesouro Direto", "Compromissadas"],
+    "Renda Variável": ["Ações", "Produto Estruturado", "Direito de subscrição", "L&S", "Termo"],
+    "Fundos": ["Cetipado / Renda+", "Oferta Pública de Fundos", "Fundos"],
+    "Internacional": ["Equity", "Bonds", "Treasury", "CDs", "Mutual Funds", "Notes"],
+    "Eqseed": ["Oferta Pública"],
+    "MB": ["Renda Fixa Digital"],
+    "Crédito": ["Clean", "Home Equity", "Capital de giro", "Com garantia"],
+    "Consórcio": ["Auto", "Imóvel"],
+    "Seguro": ["Vida"],
+    "Previdência": ["PGBL", "VGBL"]
+}
+
+# --- FUNÇÕES AUXILIARES ---
 def formatar_brl(valor):
     if valor is None: return "R$ 0,00"
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-# --- CAMADA DE DADOS (COM CORREÇÃO AUTOMÁTICA DE COLUNAS) ---
-DB_NAME = "operacoes_financeiras.db"
-
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect("operacoes_financeiras.db")
     c = conn.cursor()
-    # 1. Cria a tabela base se não existir
     c.execute('''
         CREATE TABLE IF NOT EXISTS operacoes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             data_hora TEXT,
+            assessor TEXT,
             conta TEXT,
             produto TEXT,
             subproduto TEXT,
@@ -32,155 +44,153 @@ def init_db():
             comissao REAL
         )
     ''')
-    
-    # 2. VERIFICAÇÃO DE COLUNA (Migração Automática)
-    # Tenta ler a tabela para ver se a coluna 'assessor' existe
-    c.execute("PRAGMA table_info(operacoes)")
-    colunas = [col[1] for col in c.fetchall()]
-    
-    if 'assessor' not in colunas:
-        st.warning("Atualizando estrutura do banco de dados...")
-        c.execute("ALTER TABLE operacoes ADD COLUMN assessor TEXT DEFAULT 'Nao Informado'")
-    
     conn.commit()
     conn.close()
 
 def salvar_dados(dados):
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect("operacoes_financeiras.db")
     df = pd.DataFrame([dados])
     df.to_sql("operacoes", conn, if_exists="append", index=False)
     conn.close()
 
 def carregar_dados():
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect("operacoes_financeiras.db")
     df = pd.read_sql("SELECT * FROM operacoes", conn)
     conn.close()
+    if not df.empty:
+        df['data_hora'] = pd.to_datetime(df['data_hora'], dayfirst=True)
+        df['mes_ano'] = df['data_hora'].dt.strftime('%m/%Y')
     return df
 
-# --- LÓGICA DE NEGÓCIO ---
-def calcular_comissao(volume, roa_percentual):
-    return volume * (roa_percentual / 100)
+def excluir_registro(id_registro):
+    conn = sqlite3.connect("operacoes_financeiras.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM operacoes WHERE id = ?", (id_registro,))
+    conn.commit()
+    conn.close()
 
-# --- INTERFACE ---
+# --- INTERFACE PRINCIPAL ---
 def main():
     init_db()
+    st.title("📈 Trade Tracker Pro | Analytics")
     
-    st.title("🚀 Registro de Operações Financeiras")
-    st.markdown("---")
+    if 'form_reset' not in st.session_state:
+        st.session_state.form_reset = 0
 
-    st.sidebar.header("Configurações e Filtros")
     df_raw = carregar_dados()
+    lista_assessores = ["Amanda Ramos", "Bruno Miceli", "João Viegas", "Julio Rodriguez", "Marcio Ventura", "Ronaldo Azevedo"]
 
-    # Lista de Assessores solicitada
-    lista_assessores = [
-        "Amanda Ramos", "Bruno Miceli", "João Viegas", 
-        "Julio Rodriguez", "Marcio Ventura", "Ronaldo Azevedo"
-    ]
-
-    # Formulário de Entrada
-    with st.expander("➕ Registrar Nova Operação", expanded=True):
-        with st.form("form_operacao", clear_on_submit=True):
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                assessor = st.selectbox("Assessor", lista_assessores)
-                conta = st.text_input("Conta / Cliente")
-                produto = st.selectbox("Produto", ["Renda Variável", "Renda Fixa", "Derivativos", "Tesouro"])
-            
-            with col2:
-                subproduto = st.text_input("Subproduto", placeholder="Ex: Ação, FII, Opção")
-                ativo = st.text_input("Ativo (Ticker)", placeholder="Ex: PETR4, VALE3")
-                tipo_op = st.selectbox("Tipo de Operação", ["Compra", "Venda"])
-            
-            with col3:
-                volume = st.number_input("Volume Financeiro (R$)", min_value=0.0, step=100.0, format="%.2f")
-                roa_global = st.number_input("ROA Global (%)", min_value=0.0, max_value=100.0, step=0.01, format="%.2f")
-                
-                # Cálculo da comissão em tempo real para o preview
-                valor_comissao_prev = calcular_comissao(volume, roa_global)
-                st.markdown("**Comissão Estimada:**")
-                st.info(formatar_brl(valor_comissao_prev))
-            
-            submit = st.form_submit_button("Salvar Operação")
-
-            if submit:
-                if conta and ativo and volume > 0:
-                    nova_op = {
-                        "data_hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-                        "assessor": assessor,
-                        "conta": conta,
-                        "produto": produto,
-                        "subproduto": subproduto,
-                        "ativo": ativo.upper(),
-                        "tipo_operacao": tipo_op,
-                        "volume": volume,
-                        "roa_global": roa_global / 100,
-                        "comissao": calcular_comissao(volume, roa_global)
-                    }
-                    salvar_dados(nova_op)
-                    st.success(f"Operação registrada por {assessor}!")
-                    st.rerun()
-                else:
-                    st.error("Por favor, preencha os campos obrigatórios (Conta, Ativo e Volume).")
-
-    # DASHBOARD
+    # --- BARRA LATERAL (FILTROS) ---
+    st.sidebar.header("🔍 Filtros de Performance")
+    
+    filtro_assessor = st.sidebar.selectbox("Selecionar Assessor", ["Todos"] + lista_assessores)
+    
+    meses_disponiveis = ["Todos"]
     if not df_raw.empty:
-        # Filtros na Barra Lateral
-        st.sidebar.subheader("Filtrar Visão")
+        meses_disponiveis += sorted(df_raw['mes_ano'].unique().tolist(), reverse=True)
+    filtro_mes = st.sidebar.selectbox("Selecionar Mês/Ano", meses_disponiveis)
+
+    # --- REGISTRO DE OPERAÇÃO ---
+    with st.expander("➕ Registrar Nova Operação", expanded=False):
+        key_suffix = str(st.session_state.form_reset)
+        col1, col2, col3 = st.columns(3)
         
-        # Filtro de Assessor
-        assessores_no_db = ["Todos"] + sorted(df_raw["assessor"].unique().tolist())
-        filtro_assessor = st.sidebar.selectbox("Por Assessor", assessores_no_db)
+        with col1:
+            assessor = st.selectbox("Assessor", lista_assessores, index=None, placeholder="Assessor", key="as"+key_suffix)
+            conta = st.text_input("Conta / Cliente", key="ct"+key_suffix)
+            produto_sel = st.selectbox("Produto", list(MAPA_PRODUTOS.keys()), index=None, key="pr"+key_suffix)
         
-        # Filtro de Conta
-        contas_unicas = ["Todos"] + sorted(df_raw["conta"].unique().tolist())
-        filtro_conta = st.sidebar.selectbox("Por Conta", contas_unicas)
+        with col2:
+            opcoes_sub = MAPA_PRODUTOS.get(produto_sel, [])
+            subproduto_sel = st.selectbox("Subproduto", opcoes_sub, index=None, key="sb"+key_suffix)
+            ativo = st.text_input("Ativo (Ticker)", key="at"+key_suffix)
+            tipo_op = st.selectbox("Tipo", ["Compra", "Venda"], index=None, key="tp"+key_suffix)
         
-        # Aplicação dos Filtros
-        df_display = df_raw.copy()
+        with col3:
+            volume = st.number_input("Volume (R$)", min_value=0.0, format="%.2f", key="vl"+key_suffix)
+            roa_global = st.number_input("ROA Global (%)", min_value=0.0, format="%.2f", key="ro"+key_suffix)
+            
+            # Regra Consórcio
+            taxa_decimal = roa_global / 100
+            if produto_sel == "Consórcio":
+                div = 12 if subproduto_sel == "Imóvel" else (6 if subproduto_sel == "Auto" else 1)
+                comissao_calc = volume * (taxa_decimal / div)
+            else:
+                comissao_calc = volume * taxa_decimal
+            
+            st.info(f"Comissão: {formatar_brl(comissao_calc)}")
+            
+            if st.button("Salvar Registro", type="primary", use_container_width=True):
+                if all([assessor, conta, produto_sel, subproduto_sel, ativo, tipo_op]) and volume > 0:
+                    salvar_dados({
+                        "data_hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+                        "assessor": assessor, "conta": conta, "produto": produto_sel,
+                        "subproduto": subproduto_sel, "ativo": ativo.upper(),
+                        "tipo_operacao": tipo_op, "volume": volume,
+                        "roa_global": taxa_decimal, "comissao": comissao_calc
+                    })
+                    st.success("Salvo!")
+                    st.session_state.form_reset += 1
+                    st.rerun()
+
+    # --- LÓGICA DE FILTRAGEM ---
+    df_filtrado = df_raw.copy()
+    if not df_filtrado.empty:
         if filtro_assessor != "Todos":
-            df_display = df_display[df_display["assessor"] == filtro_assessor]
-        if filtro_conta != "Todos":
-            df_display = df_display[df_display["conta"] == filtro_conta]
+            df_filtrado = df_filtrado[df_filtrado['assessor'] == filtro_assessor]
+        if filtro_mes != "Todos":
+            df_filtrado = df_filtrado[df_filtrado['mes_ano'] == filtro_mes]
 
-        # KPIs com formatação brasileira
-        st.subheader("Indicadores de Performance")
-        kpi1, kpi2, kpi3 = st.columns(3)
-        
-        total_vol = df_display["volume"].sum()
-        total_com = df_display["comissao"].sum()
-        roa_medio = (total_com / total_vol * 100) if total_vol > 0 else 0
+    # --- DASHBOARD DE PERFORMANCE ---
+    if not df_filtrado.empty:
+        st.markdown("---")
+        # KPIs
+        c1, c2, c3, c4 = st.columns(4)
+        vol_total = df_filtrado['volume'].sum()
+        com_total = df_filtrado['comissao'].sum()
+        roa_medio = (com_total / vol_total * 100) if vol_total > 0 else 0
+        num_ops = len(df_filtrado)
 
-        kpi1.metric("Volume Total", formatar_brl(total_vol))
-        kpi2.metric("Comissão Total", formatar_brl(total_com))
-        kpi3.metric("ROA Médio", f"{roa_medio:.2f}%".replace(".", ","))
+        c1.metric("Volume Total", formatar_brl(vol_total))
+        c2.metric("Receita Estimada", formatar_brl(com_total))
+        c3.metric("ROA Médio do Período", f"{roa_medio:.4f}%")
+        c4.metric("Qtd. Operações", num_ops)
 
-        # Tabela com histórico
-        st.subheader("Histórico de Operações")
+        # GRÁFICOS
+        st.markdown("### 📊 Análise de Alocação")
+        g1, g2 = st.columns(2)
+
+        with g1:
+            fig_prod = px.pie(df_filtrado, values='volume', names='produto', title="Distribuição por Produto", hole=0.4)
+            st.plotly_chart(fig_prod, use_container_width=True)
+
+        with g2:
+            df_sub = df_filtrado.groupby('subproduto')['volume'].sum().reset_index().sort_values('volume', ascending=True)
+            fig_sub = px.bar(df_sub, x='volume', y='subproduto', orientation='h', title="Volume por Subproduto", color='volume', color_continuous_scale='Blues')
+            st.plotly_chart(fig_sub, use_container_width=True)
+
+        # TABELA
+        st.markdown("### 📝 Histórico Detalhado")
         st.dataframe(
-            df_display.sort_values(by="id", ascending=False),
-            use_container_width=True,
-            hide_index=True,
+            df_filtrado.sort_values('data_hora', ascending=False),
             column_config={
-                "assessor": "Assessor",
-                "volume": st.column_config.NumberColumn("Volume (R$)", format="R$ %.2f"),
-                "roa_global": st.column_config.NumberColumn("ROA (%)", format="%.4f"),
-                "comissao": st.column_config.NumberColumn("Comissão (R$)", format="R$ %.2f"),
                 "data_hora": "Data/Hora",
-                "id": None
-            }
+                "roa_global": st.column_config.NumberColumn("ROA (%)", format="%.4f"),
+                "volume": st.column_config.NumberColumn("Volume", format="R$ %.2f"),
+                "comissao": st.column_config.NumberColumn("Comissão", format="R$ %.2f"),
+                "mes_ano": None # Esconde coluna auxiliar
+            },
+            use_container_width=True, hide_index=True
         )
-
-        # Download CSV
-        csv = df_display.to_csv(index=False).encode('utf-8-sig')
-        st.sidebar.download_button(
-            label="📥 Baixar Base em CSV",
-            data=csv,
-            file_name=f"operacoes_{datetime.now().strftime('%d_%m_%Y')}.csv",
-            mime="text/csv",
-        )
+        
+        # Gestão de Exclusão na Sidebar
+        st.sidebar.markdown("---")
+        id_del = st.sidebar.number_input("ID para excluir", min_value=0, step=1)
+        if st.sidebar.button("Excluir Registro", type="secondary"):
+            excluir_registro(id_del)
+            st.rerun()
     else:
-        st.info("Aguardando o primeiro registro para exibir o dashboard.")
+        st.warning("Nenhum dado encontrado para os filtros selecionados.")
 
 if __name__ == "__main__":
     main()
