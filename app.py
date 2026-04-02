@@ -4,10 +4,24 @@ import sqlite3
 from datetime import datetime
 import plotly.express as px
 import io
-import numpy as np  # Necessário para os cálculos estatísticos
+import numpy as np
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Trade Tracker Pro", layout="wide", page_icon="📈")
+
+# --- CSS PARA ESTILIZAÇÃO DE KPIs ---
+st.markdown("""
+    <style>
+    /* Reduz o tamanho da fonte dos valores nos st.metric */
+    [data-testid="stMetricValue"] {
+        font-size: 1.8rem !important;
+    }
+    /* Opcional: Reduz o tamanho do label (título) do KPI */
+    [data-testid="stMetricLabel"] {
+        font-size: 0.9rem !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 # --- DICIONÁRIO DE PRODUTOS E SUBPRODUTOS ---
 MAPA_PRODUTOS = {
@@ -25,12 +39,16 @@ MAPA_PRODUTOS = {
 }
 
 # --- FUNÇÕES AUXILIARES ---
+def formatar_br_num(valor):
+    """Formata números para o padrão brasileiro: 1.234,56"""
+    if valor is None: return "0,00"
+    return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
 def formatar_brl(valor):
-    if valor is None: return "R$ 0,00"
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    """Formata moeda para o padrão brasileiro: R$ 1.234,56"""
+    return f"R$ {formatar_br_num(valor)}"
 
 def calcular_gini(df):
-    """Calcula o Índice de Gini para diversificação de volume por produto"""
     volumes = df.groupby('produto')['volume'].sum().values
     if len(volumes) <= 1: return 1.0
     volumes = np.sort(volumes)
@@ -195,21 +213,15 @@ def main():
     if not df_filtrado.empty:
         st.markdown("---")
         
-        # --- CÁLCULOS DOS INDICADORES SOLICITADOS ---
         vol_total = df_filtrado['volume'].sum()
         com_total_bruta = df_filtrado['comissao'].sum()
         com_total_liq = df_filtrado['comissao_liquida'].sum()
         num_ops = len(df_filtrado)
         
-        # 1. ROA Médio Global
         roa_medio_real = (com_total_bruta / vol_total * 100) if vol_total > 0 else 0
-        # 2. Eficiência de Conversão
         eficiencia = (com_total_liq / com_total_bruta * 100) if com_total_bruta > 0 else 0
-        # 3. Gini de Concentração
         gini_score = calcular_gini(df_filtrado)
-        # 4. Payback de Esforço (KPI de Ouro)
         payback_esforco = (com_total_liq / num_ops) if num_ops > 0 else 0
-        # 5. Velocity de Giro (Churn de Volume) - Ops por Milhão transacionado
         velocity = (num_ops / (vol_total / 1_000_000)) if vol_total > 0 else 0
 
         # LINHA 1: KPIs Principais
@@ -217,14 +229,14 @@ def main():
         c1.metric("Volume Total", formatar_brl(vol_total))
         c2.metric("Líquida Assessor", formatar_brl(com_total_liq))
         c3.metric("Payback de Esforço", formatar_brl(payback_esforco), help="Receita líquida média gerada por operação realizada.")
-        c4.metric("ROA Médio Global", f"{roa_medio_real:.4f}%")
+        c4.metric("ROA Médio Global", f"{formatar_br_num(roa_medio_real)}%")
 
         # LINHA 2: Deep Analytics
         st.markdown("#### 🧬 Deep Analytics: Gestão e Eficiência")
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Eficiência de Conversão", f"{eficiencia:.1f}%", help="Percentual da comissão bruta que sobra líquida.")
-        k2.metric("Velocity (Giro)", f"{velocity:.2f}", help="Quantidade de operações para cada R$ 1MM transacionado.")
-        k3.metric("Índice de Gini", f"{gini_score:.2f}", help="0 = Diversificado | 1 = Concentrado em um único produto.")
+        k1.metric("Eficiência de Conversão", f"{formatar_br_num(eficiencia)}%", help="Percentual da comissão bruta que sobra líquida.")
+        k2.metric("Velocity (Giro)", formatar_br_num(velocity), help="Quantidade de operações para cada R$ 1MM transacionado.")
+        k3.metric("Índice de Gini", formatar_br_num(gini_score), help="0 = Diversificado | 1 = Concentrado em um único produto.")
         k4.info("Concentrado" if gini_score > 0.7 else "Diversificado")
 
         # LINHA 3: Tabelas de Pareto e Segmento
@@ -235,20 +247,30 @@ def main():
             st.write("**Concentração de Receita (Pareto por Assessor)**")
             pareto_df = df_filtrado.groupby('assessor')['comissao_liquida'].sum().sort_values(ascending=False).reset_index()
             pareto_df['Participação %'] = (pareto_df['comissao_liquida'] / com_total_liq * 100).round(2)
-            st.dataframe(pareto_df, hide_index=True, use_container_width=True)
+            st.dataframe(
+                pareto_df.style.format({
+                    'comissao_liquida': 'R$ {:,.2f}',
+                    'Participação %': '{:,.2f}%'
+                }, decimal=',', thousands='.'), 
+                hide_index=True, use_container_width=True
+            )
 
         with col_segmento:
             st.write("**Ticket Médio e ROA por Segmento**")
-            # Ticket Médio por Segmento e ROA por Produto
             segmento_stats = df_filtrado.groupby('produto').agg({
                 'volume': 'mean',
                 'comissao': 'sum'
             }).reset_index()
-            # ROA por Produto
             vol_por_prod = df_filtrado.groupby('produto')['volume'].sum()
-            segmento_stats['ROA %'] = (segmento_stats['comissao'] / vol_por_prod.values * 100).round(4)
+            segmento_stats['ROA %'] = (segmento_stats['comissao'] / vol_por_prod.values * 100)
             segmento_stats = segmento_stats.rename(columns={'volume': 'Ticket Médio (R$)'}).drop(columns=['comissao'])
-            st.dataframe(segmento_stats.style.format({'Ticket Médio (R$)': 'R$ {:,.2f}', 'ROA %': '{:.4f}%'}), hide_index=True, use_container_width=True)
+            st.dataframe(
+                segmento_stats.style.format({
+                    'Ticket Médio (R$)': 'R$ {:,.2f}', 
+                    'ROA %': '{:,.2f}%'
+                }, decimal=',', thousands='.'), 
+                hide_index=True, use_container_width=True
+            )
 
         # Gráficos
         st.markdown("### 📊 Visualização de Performance")
@@ -261,19 +283,34 @@ def main():
             fig_pizza = px.pie(df_filtrado, values='volume', names='produto', title="Alocação por Produto (%)", hole=0.4)
             st.plotly_chart(fig_pizza, use_container_width=True)
 
-        # Tabela Detalhada
+        # --- TABELA DETALHADA (HISTÓRICO) COM FORMATAÇÃO SOLICITADA ---
         st.markdown("### 📝 Histórico Detalhado")
+        
+        # Preparando a visualização com .style.format()
+        df_visualizacao = df_filtrado.sort_values('data_operacao', ascending=False).copy()
+        
+        # Renomeando internamente apenas para o display (Bruta/Líquida) conforme seu pedido anterior
+        df_visualizacao = df_visualizacao.rename(columns={
+            'comissao': 'Bruta',
+            'comissao_liquida': 'Líquida',
+            'roa_global': 'ROA (%)',
+            'volume': 'Volume'
+        })
+
         st.dataframe(
-            df_filtrado.sort_values('data_operacao', ascending=False),
+            df_visualizacao.style.format({
+                'Volume': 'R$ {:,.2f}',
+                'Bruta': 'R$ {:,.2f}',
+                'Líquida': 'R$ {:,.2f}',
+                'ROA (%)': '{:.2%}' # Converte decimal 0.05 em 5,00%
+            }, decimal=',', thousands='.'),
             column_config={
                 "data_operacao": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
-                "volume": st.column_config.NumberColumn("Volume", format="R$ %.2f"),
-                "comissao": st.column_config.NumberColumn("Bruta", format="R$ %.2f"),
-                "comissao_liquida": st.column_config.NumberColumn("Líquida", format="R$ %.2f"),
-                "roa_global": st.column_config.NumberColumn("ROA (%)", format="%.4f"),
-                "data_hora_registro": None, "mes_ano": None
+                "data_hora_registro": None, 
+                "mes_ano": None
             },
-            use_container_width=True, hide_index=True
+            use_container_width=True, 
+            hide_index=True
         )
         
         # Sidebar Exclusão
