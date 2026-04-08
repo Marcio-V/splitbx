@@ -66,14 +66,15 @@ def calcular_comissao_liquida(valor_bruto, produto, subproduto):
         return valor_bruto * 0.85 * base_comum
     return valor_bruto
 
-# --- FUNÇÕES DE DADOS (CRÍTICAS PARA PERSISTÊNCIA) ---
+# --- FUNÇÕES DE DADOS ---
 
 def carregar_dados():
-    """Lê os dados do Sheets forçando TTL=0 para evitar dados obsoletos no deploy."""
+    """Lê os dados do Sheets forçando TTL=0 e corrigindo o parsing de data."""
     try:
         df = conn.read(ttl=0) 
         if df is not None and not df.empty:
-            df['data_operacao'] = pd.to_datetime(df['data_operacao'])
+            # AJUSTE AQUI: format='mixed' resolve o conflito de data com/sem hora
+            df['data_operacao'] = pd.to_datetime(df['data_operacao'], format='mixed', dayfirst=False)
             df['mes_ano'] = df['data_operacao'].dt.strftime('%m/%Y')
             df['id'] = pd.to_numeric(df['id'], errors='coerce')
             return df
@@ -84,19 +85,15 @@ def carregar_dados():
 
 def salvar_dados(novo_registro):
     """Lógica de persistência: Lê a base real antes de salvar para evitar sobrescrita."""
-    # 1. Busca a base mais recente da nuvem AGORA
     df_realtime = carregar_dados()
     
-    # 2. Gera ID baseado na realidade da planilha
-    novo_id = int(df_realtime['id'].max() + 1) if not df_realtime.empty else 1
+    novo_id = int(df_realtime['id'].max() + 1) if not df_realtime.empty and not df_realtime['id'].isna().all() else 1
     novo_registro['id'] = novo_id
     
-    # 3. Concatena e remove colunas temporárias/calculadas
     updated_df = pd.concat([df_realtime, pd.DataFrame([novo_registro])], ignore_index=True)
     if 'mes_ano' in updated_df.columns:
         updated_df = updated_df.drop(columns=['mes_ano'])
     
-    # 4. Atualiza o Sheets e limpa o cache local
     conn.update(data=updated_df)
     st.cache_data.clear()
 
@@ -193,7 +190,6 @@ def main():
         st.dataframe(
             df_vis.style.format({
                 'id': '{:.0f}', 
-                'conta': '{:.0f}', 
                 'Volume': 'R$ {:,.2f}',
                 'Bruta': 'R$ {:,.2f}',
                 'Líquida': 'R$ {:,.2f}',
