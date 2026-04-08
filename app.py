@@ -3,17 +3,17 @@ import pandas as pd
 from streamlit_gsheets import GSheetsConnection
 from datetime import datetime
 import plotly.express as px
-import io
 import numpy as np
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Trade Tracker Pro", layout="wide", page_icon="📈")
 
-# --- CSS PARA ESTILIZAÇÃO DE KPIs ---
+# --- CSS PARA ESTILIZAÇÃO ---
 st.markdown("""
     <style>
-    [data-testid="stMetricValue"] { font-size: 1.8rem !important; }
-    [data-testid="stMetricLabel"] { font-size: 0.9rem !important; }
+    [data-testid="stMetricValue"] { font-size: 1.8rem !important; color: #1e3a8a; }
+    [data-testid="stMetricLabel"] { font-size: 0.9rem !important; font-weight: bold; }
+    .stDataFrame { border: 1px solid #e6e9ef; border-radius: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -44,6 +44,7 @@ def formatar_brl(valor):
     return f"R$ {formatar_br_num(valor)}"
 
 def calcular_gini(df):
+    if df.empty or 'produto' not in df.columns: return 0.0
     volumes = df.groupby('produto')['volume'].sum().values
     if len(volumes) <= 1: return 0.0
     volumes = np.sort(volumes)
@@ -58,42 +59,51 @@ def calcular_comissao_liquida(valor_bruto, produto, subproduto):
         return valor_bruto * 0.75 * 0.85 * base_especialist
     elif produto == "Renda Fixa":
         return valor_bruto * 0.95 * 0.85 * base_comum
-    elif subproduto == "Oferta Pública de Fundos":
-        return valor_bruto * 0.75 * 0.85 * base_especialist
-    elif subproduto == "Cetipado / Renda+":
-        return valor_bruto * 0.85 * base_especialist
+    elif subproduto in ["Oferta Pública de Fundos", "Cetipado / Renda+"]:
+        taxa = 0.75 if subproduto == "Oferta Pública de Fundos" else 0.85
+        return valor_bruto * taxa * base_especialist
     elif subproduto == "COE":
         return valor_bruto * 0.85 * base_comum
     return valor_bruto
 
-# --- FUNÇÕES DE DADOS (GOOGLE SHEETS) ---
+# --- FUNÇÕES DE DADOS (CRÍTICAS PARA PERSISTÊNCIA) ---
+
 def carregar_dados():
+    """Lê os dados do Sheets forçando TTL=0 para evitar dados obsoletos no deploy."""
     try:
-        df = conn.read(ttl="0") 
-        if not df.empty:
+        df = conn.read(ttl=0) 
+        if df is not None and not df.empty:
             df['data_operacao'] = pd.to_datetime(df['data_operacao'])
             df['mes_ano'] = df['data_operacao'].dt.strftime('%m/%Y')
-            # Garante que ID e Conta sejam numéricos para evitar erros de formatação
             df['id'] = pd.to_numeric(df['id'], errors='coerce')
-        return df
-    except Exception:
-        return pd.DataFrame(columns=[
-            "id", "data_hora_registro", "data_operacao", "assessor", "conta", 
-            "produto", "subproduto", "ativo", "tipo_operacao", "volume", 
-            "roa_global", "comissao", "comissao_liquida"
-        ])
+            return df
+        return pd.DataFrame(columns=["id", "data_hora_registro", "data_operacao", "assessor", "conta", "produto", "subproduto", "ativo", "tipo_operacao", "volume", "roa_global", "comissao", "comissao_liquida"])
+    except Exception as e:
+        st.error(f"Erro ao carregar dados: {e}")
+        return pd.DataFrame()
 
-def salvar_dados(novo_registro, df_atual):
-    novo_id = int(df_atual['id'].max() + 1) if not df_atual.empty else 1
+def salvar_dados(novo_registro):
+    """Lógica de persistência: Lê a base real antes de salvar para evitar sobrescrita."""
+    # 1. Busca a base mais recente da nuvem AGORA
+    df_realtime = carregar_dados()
+    
+    # 2. Gera ID baseado na realidade da planilha
+    novo_id = int(df_realtime['id'].max() + 1) if not df_realtime.empty else 1
     novo_registro['id'] = novo_id
-    updated_df = pd.concat([df_atual, pd.DataFrame([novo_registro])], ignore_index=True)
+    
+    # 3. Concatena e remove colunas temporárias/calculadas
+    updated_df = pd.concat([df_realtime, pd.DataFrame([novo_registro])], ignore_index=True)
     if 'mes_ano' in updated_df.columns:
         updated_df = updated_df.drop(columns=['mes_ano'])
+    
+    # 4. Atualiza o Sheets e limpa o cache local
     conn.update(data=updated_df)
     st.cache_data.clear()
 
-def excluir_registro(id_registro, df_atual):
-    updated_df = df_atual[df_atual['id'] != id_registro]
+def excluir_registro(id_registro):
+    """Exclui baseando-se na versão mais recente do Sheets."""
+    df_realtime = carregar_dados()
+    updated_df = df_realtime[df_realtime['id'] != id_registro]
     if 'mes_ano' in updated_df.columns:
         updated_df = updated_df.drop(columns=['mes_ano'])
     conn.update(data=updated_df)
@@ -159,7 +169,7 @@ def main():
                         "tipo_operacao": tipo_op, "volume": volume,
                         "roa_global": taxa_decimal, "comissao": comissao_bruta,
                         "comissao_liquida": comissao_liq
-                    }, df_raw)
+                    })
                     st.success("Salvo no Google Sheets!")
                     st.session_state.form_reset += 1
                     st.rerun()
@@ -176,24 +186,21 @@ def main():
         c3.metric("Índice de Gini", formatar_br_num(calcular_gini(df_filtrado)))
         c4.metric("Nº Operações", len(df_filtrado))
 
-        # --- TABELA HISTÓRICA COM FORMATAÇÃO AJUSTADA ---
         st.markdown("### 📝 Histórico Detalhado")
         df_vis = df_filtrado.sort_values('data_operacao', ascending=False).copy()
-        df_vis = df_vis.rename(columns={
-            'comissao': 'Bruta', 'comissao_liquida': 'Líquida', 'roa_global': 'ROA (%)', 'volume': 'Volume'
-        })
+        df_vis = df_vis.rename(columns={'comissao': 'Bruta', 'comissao_liquida': 'Líquida', 'roa_global': 'ROA (%)', 'volume': 'Volume'})
         
         st.dataframe(
             df_vis.style.format({
-                'id': '{:.0f}',          # ID como inteiro sem decimais
-                'conta': '{:.0f}',           # Conta sem separadores de milhar ou vírgula
+                'id': '{:.0f}', 
+                'conta': '{:.0f}', 
                 'Volume': 'R$ {:,.2f}',
                 'Bruta': 'R$ {:,.2f}',
                 'Líquida': 'R$ {:,.2f}',
                 'ROA (%)': '{:.2%}'
             }, decimal=',', thousands='.'),
             column_config={
-                "id": st.column_config.NumberColumn("ID", format="%d"), # Reforça formato inteiro no display
+                "id": st.column_config.NumberColumn("ID", format="%d"),
                 "data_operacao": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
                 "data_hora_registro": None, 
                 "mes_ano": None
@@ -202,11 +209,10 @@ def main():
             hide_index=True
         )
         
-        # Sidebar Exclusão
         st.sidebar.markdown("---")
         id_del = st.sidebar.number_input("ID para excluir", min_value=0, step=1)
         if st.sidebar.button("Excluir Registro"):
-            excluir_registro(id_del, df_raw)
+            excluir_registro(id_del)
             st.rerun()
     else:
         st.warning("Aguardando registros ou filtros...")
